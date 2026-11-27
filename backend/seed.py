@@ -1,14 +1,8 @@
-"""Seeds the demo case. Run once before starting uvicorn; safe to re-run."""
+"""Demo account fixtures. Run directly to refresh the fixtures and precompute routes."""
 import json
 
 import db
-from security import DEMO_USERNAME
-
-# The shared demo credential is stored in the same salted format as other accounts.
-DEMO_PASSWORD_HASH = (
-    "a1562b48d4e9da808d4936952cb00e2c:0e9aa8a172e7a37f786c4303e4e46b3b968883b3a0e7e2e5baff8fe658e21b9df"
-    "6fbdb28214d88f5612f8d814da7e317a10f846115e6eb9dbc27e3b38a99d88a"
-)
+from security import DEMO_PASSWORD_HASH, DEMO_USERNAME
 
 CASE_ID = "2026-PUN-0219"
 
@@ -125,17 +119,24 @@ OTHER_CASES = [
 SURESH_VEHICLE = {"vehicle": "white Honda Activa", "plate": "MH12 AB 4521", "relation": "Shop owner"}
 
 
-def _upsert_case(conn, case: dict, subjects: list, evidence: list) -> None:
+class DemoCaseConflict(ValueError):
+    """An existing case could contain private records."""
+
+
+def _upsert_case(conn, case: dict, subjects: list, evidence: list, *, exact_fixture: bool = False) -> None:
     case_id = case["id"]
-    existing = conn.execute("SELECT name, owner FROM cases WHERE id = ?", (case_id,)).fetchone()
+    existing = conn.execute("SELECT * FROM cases WHERE id = ?", (case_id,)).fetchone()
     if existing and existing["owner"] != DEMO_USERNAME:
         people = conn.execute("SELECT * FROM subjects WHERE case_id = ?", (case_id,)).fetchall()
         expected_people = {person["full_name"]: person for person in subjects}
         records = conn.execute("SELECT * FROM evidence WHERE case_id = ?", (case_id,)).fetchall()
         expected_records = {item["evidence_type"]: item for item in evidence}
         interviews = conn.execute("SELECT 1 FROM sessions WHERE case_id = ? LIMIT 1", (case_id,)).fetchone()
-        conflict = ValueError(f"Case {case_id} may contain private records. Seed into a separate database.")
+        conflict = DemoCaseConflict(f"Case {case_id} may contain private records. Seed into a separate database.")
         if existing["owner"] is not None or existing["name"] != case["name"] or interviews:
+            raise conflict
+        fixture = {"status": "Open", "incident_date": None, **case}
+        if exact_fixture and any(existing[field] != value for field, value in fixture.items()):
             raise conflict
         for person in people:
             expected = expected_people.get(person["full_name"])
@@ -197,29 +198,60 @@ def _add_people_and_evidence(conn, case_id: str, subjects: list, evidence: list)
                 )
 
 
+def _seed_demo_account(conn) -> None:
+    updated = conn.execute(
+        """INSERT INTO accounts (username, password_hash) VALUES (?, ?)
+           ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash
+           WHERE accounts.password_hash <> excluded.password_hash""",
+        (DEMO_USERNAME, DEMO_PASSWORD_HASH),
+    )
+    if updated.rowcount:
+        conn.execute("DELETE FROM auth_sessions WHERE username = ?", (DEMO_USERNAME,))
+
+
+def _seed_main_case(conn, *, exact_fixture: bool = False) -> None:
+    _upsert_case(conn, {**CASE, **INCIDENT}, SUBJECTS, EVIDENCE, exact_fixture=exact_fixture)
+    for subject in SUBJECTS:
+        conn.execute(
+            "UPDATE subjects SET role = :role, notes = :notes WHERE case_id = :case_id AND full_name = :full_name",
+            {**subject, "case_id": CASE_ID},
+        )
+    conn.execute(
+        "UPDATE subjects SET vehicle = :vehicle, plate = :plate, relation = :relation "
+        "WHERE case_id = :case_id AND full_name = 'Suresh Deshmukh'",
+        {**SURESH_VEHICLE, "case_id": CASE_ID},
+    )
+    # The earlier story's paan-stall sighting is no longer part of the case.
+    conn.execute(
+        "DELETE FROM evidence WHERE case_id = ? AND source = 'seed' AND evidence_type = 'witness_statement' "
+        "AND id NOT IN (SELECT evidence_id FROM alibi_findings WHERE evidence_id IS NOT NULL)",
+        (CASE_ID,),
+    )
+
+
+def seed_missing_demo_cases(conn) -> None:
+    """Provision missing fixtures within the transaction that creates the login session."""
+    _seed_demo_account(conn)
+    owned = {row["id"] for row in conn.execute("SELECT id FROM cases WHERE owner = ?", (DEMO_USERNAME,))}
+    if CASE_ID not in owned:
+        try:
+            _seed_main_case(conn, exact_fixture=True)
+        except DemoCaseConflict:
+            pass
+    for other in OTHER_CASES:
+        if other["case"]["id"] not in owned:
+            try:
+                _upsert_case(conn, other["case"], other["subjects"], other["evidence"], exact_fixture=True)
+            except DemoCaseConflict:
+                continue
+
+
 def seed() -> None:
-    """The demo starts with no interviews. The street cleaner is not seeded: he is added live."""
+    """Refresh the demo fixtures without resetting existing interviews."""
     db.init_db()
     with db.connect() as conn:
-        conn.execute("INSERT OR IGNORE INTO accounts VALUES (?, ?)", (DEMO_USERNAME, DEMO_PASSWORD_HASH))
-        # Upsert, not REPLACE: replacing the row would break the sessions that reference it.
-        _upsert_case(conn, {**CASE, **INCIDENT}, SUBJECTS, EVIDENCE)
-        for subject in SUBJECTS:  # keep seeded people current on an existing database
-            conn.execute(
-                "UPDATE subjects SET role = :role, notes = :notes WHERE case_id = :case_id AND full_name = :full_name",
-                {**subject, "case_id": CASE_ID},
-            )
-        conn.execute(
-            "UPDATE subjects SET vehicle = :vehicle, plate = :plate, relation = :relation "
-            "WHERE case_id = :case_id AND full_name = 'Suresh Deshmukh'",
-            {**SURESH_VEHICLE, "case_id": CASE_ID},
-        )
-        # The earlier story's paan-stall sighting is no longer part of the case.
-        conn.execute(
-            "DELETE FROM evidence WHERE case_id = ? AND source = 'seed' AND evidence_type = 'witness_statement' "
-            "AND id NOT IN (SELECT evidence_id FROM alibi_findings WHERE evidence_id IS NOT NULL)",
-            (CASE_ID,),
-        )
+        _seed_demo_account(conn)
+        _seed_main_case(conn)
         for other in OTHER_CASES:
             _upsert_case(conn, other["case"], other["subjects"], other["evidence"])
 

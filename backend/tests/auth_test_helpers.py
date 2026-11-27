@@ -1,15 +1,10 @@
 """Authentication fixtures for API tests."""
-from unittest.mock import patch
-
-TEST_PASSWORD = "veritas-test-only-password"
+TEST_PASSWORD = "123demo"
 
 
 def seed_demo():
     import seed
-    from security import hash_password
-
-    with patch.object(seed, "DEMO_PASSWORD_HASH", hash_password(TEST_PASSWORD)):
-        seed.seed()
+    seed.seed()
 
 
 def sign_in(client, test_api="", username="demo123"):

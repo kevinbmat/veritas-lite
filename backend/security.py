@@ -19,6 +19,10 @@ from starlette.responses import JSONResponse
 import db
 
 DEMO_USERNAME = "demo123"
+DEMO_PASSWORD_HASH = (
+    "1513415ee20a318ba8c24ed7dc9bcfbb:88802c61c986ed22e235e9f77434ee63dccd8c0c165cec81317cdbc6462dba0791"
+    "a42df9d3b964882c6e98b2c4bacadbf5ec0b55b0f040976ca3e4ae030af0a7"
+)
 ENVIRONMENT = os.getenv("VERITAS_ENV", "development")
 if ENVIRONMENT not in {"development", "production"}:
     raise RuntimeError("VERITAS_ENV must be development or production")
@@ -71,8 +75,12 @@ def _account_for(token: str) -> str | None:
     if not re.fullmatch(r"[\w-]{43}", token, flags=re.ASCII):
         return None
     with db.connect() as conn:
-        row = conn.execute("SELECT username FROM auth_sessions WHERE token_hash = ? AND expires_at > ?",
-                           (_token_hash(token), int(time.time()))).fetchone()
+        row = conn.execute(
+            """SELECT s.username FROM auth_sessions s JOIN accounts a ON s.username = a.username
+               WHERE s.token_hash = ? AND s.expires_at > ?
+               AND (s.username <> ? OR a.password_hash = ?)""",
+            (_token_hash(token), int(time.time()), DEMO_USERNAME, DEMO_PASSWORD_HASH),
+        ).fetchone()
     return row["username"] if row else None
 
 
@@ -196,18 +204,27 @@ def login(body: Credentials, request: Request, response: Response):
     if not _password_slots.acquire(blocking=False):
         raise HTTPException(429, "Too many sign-in attempts", headers={"Retry-After": "1"})
     try:
-        with db.connect() as conn:
-            row = conn.execute("SELECT password_hash FROM accounts WHERE username = ?", (body.username,)).fetchone()
-        salt, expected = (row["password_hash"] if row else _dummy_hash).split(":", 1)
+        is_demo = body.username == DEMO_USERNAME
+        if is_demo:
+            password_hash = DEMO_PASSWORD_HASH if DEMO_ENABLED else None
+        else:
+            with db.connect() as conn:
+                row = conn.execute("SELECT password_hash FROM accounts WHERE username = ?", (body.username,)).fetchone()
+            password_hash = row["password_hash"] if row else None
+        salt, expected = (password_hash or _dummy_hash).split(":", 1)
         matches = hmac.compare_digest(_scrypt(body.password, bytes.fromhex(salt)), bytes.fromhex(expected))
     finally:
         _password_slots.release()
-    if not matches or not row or (body.username == DEMO_USERNAME and not DEMO_ENABLED):
+    if not matches or password_hash is None:
         raise HTTPException(401, "Invalid username or password")
 
     token = secrets.token_urlsafe(32)
     now = int(time.time())
     with db.connect() as conn:
+        if is_demo:
+            from seed import seed_missing_demo_cases
+
+            seed_missing_demo_cases(conn)
         conn.execute("DELETE FROM auth_sessions WHERE expires_at <= ? OR token_hash = ?",
                      (now, _token_hash(request.cookies.get(COOKIE, ""))))
         conn.execute("INSERT INTO auth_sessions VALUES (?, ?, ?)", (_token_hash(token), body.username, now + SESSION_SECONDS))

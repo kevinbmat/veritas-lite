@@ -33,6 +33,48 @@ class SecurityTests(unittest.TestCase):
             ])
         self.client = self.enterContext(TestClient(main.app))
 
+    def test_demo_login_seeds_missing_cases_only_after_valid_credentials(self):
+        with patch.object(db, "DB_PATH", Path(self.directory) / "fresh.db"), TestClient(main.app) as client:
+            db.init_db()
+            denied = client.post("/auth/login", json={"username": "demo123", "password": "wrong"})
+            self.assertEqual(denied.status_code, 401)
+            with db.connect() as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM accounts").fetchone()[0], 0)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM cases").fetchone()[0], 0)
+                collision = seed.OTHER_CASES[-1]["case"]
+                blocked_id = collision["id"]
+                conn.execute("INSERT INTO cases (id, name, summary) VALUES (?, ?, ?)",
+                             (blocked_id, collision["name"], "Private case notes"))
+            sign_in(client)
+            cases = {case["id"] for case in client.get("/cases").json()}
+            self.assertEqual(cases, {seed.CASE_ID, seed.OTHER_CASES[0]["case"]["id"]})
+            self.assertEqual(client.get(f"/cases/{blocked_id}").status_code, 404)
+            with db.connect() as conn:
+                conn.execute("DELETE FROM cases WHERE id = ? AND owner IS NULL", (blocked_id,))
+            sign_in(client)
+            self.assertEqual({case["id"] for case in client.get("/cases").json()}, cases | {blocked_id})
+
+    def test_new_demo_password_rotates_existing_sessions_and_preserves_demo_work(self):
+        old_password = "6282971499"
+        old_token = "a" * 43
+        with db.connect() as conn:
+            conn.execute("UPDATE accounts SET password_hash = ? WHERE username = 'demo123'",
+                         (security.hash_password(old_password),))
+            conn.execute("INSERT INTO auth_sessions VALUES (?, ?, ?)",
+                         (security._token_hash(old_token), "demo123", 4_102_444_800))
+            conn.execute("UPDATE cases SET summary = ? WHERE id = ?", ("Existing demo edits", seed.CASE_ID))
+        session = db.create_session(seed.CASE_ID, "Suresh Deshmukh")
+        with TestClient(main.app, cookies={security.COOKIE: old_token}) as existing_client:
+            self.assertEqual(existing_client.get("/auth/session").status_code, 401)
+        denied = self.client.post("/auth/login", json={"username": "demo123", "password": old_password})
+        self.assertEqual(denied.status_code, 401)
+        sign_in(self.client)
+        self.assertEqual(self.client.get(f"/cases/{seed.CASE_ID}").json()["summary"], "Existing demo edits")
+        self.assertEqual(self.client.get(f"/sessions/{session['id']}").status_code, 200)
+        with db.connect() as conn:
+            self.assertIsNone(conn.execute("SELECT 1 FROM auth_sessions WHERE token_hash = ?",
+                                           (security._token_hash(old_token),)).fetchone())
+
     def test_authentication_expiry_and_logout(self):
         self.assertEqual(self.client.get("/cases").status_code, 401)
         self.assertEqual(self.client.get("/static/evidence/ring.svg").status_code, 401)

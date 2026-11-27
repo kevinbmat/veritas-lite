@@ -1,4 +1,4 @@
-"""FastAPI backend. Run seed.py once first, then: uvicorn main:app --port 8018"""
+"""FastAPI backend. Run with uvicorn main:app --port 8018."""
 import os
 import re
 import tempfile

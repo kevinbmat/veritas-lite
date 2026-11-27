@@ -12,9 +12,9 @@ The review covered authentication, authorization, CORS and CSRF, rate limits, pr
 
 ## Run the demo locally
 
-From the `backend` directory, install the requirements, run `python seed.py`, then run `uvicorn main:app --port 8018 --no-proxy-headers`. From the `frontend` directory, run `npm ci` and `npm run dev`. Open `http://localhost:5173` and use the requested `demo123` demo credentials.
+From the `backend` directory, install the requirements and run `uvicorn main:app --port 8018 --no-proxy-headers`. From the `frontend` directory, run `npm ci` and `npm run dev`. Open `http://localhost:5173` and sign in with username `demo123` and password `123demo`.
 
-Seeding assigns the three sample cases to `demo123`. For an existing database, seeding can claim matching fixtures. If a matching case has private ownership, interview history, or changed evidence or personal details, seeding stops. Use a fresh `VERITAS_DB` for the demo and keep the original database for private cases. To create a private account and give it an unassigned case, run `python security.py investigator --case CASE_ID` in `backend` and enter a unique password when prompted. Repeat `--case` to assign several cases.
+Successful demo sign-in seeds missing sample cases for `demo123` in the configured SQLite database. It preserves existing demo cases and interviews and skips any case ID already used by a potentially private case. To create a private account and give it an unassigned case, run `python security.py investigator --case CASE_ID` in `backend` and enter a unique password when prompted. Repeat `--case` to assign several cases.
 
 ## Deploy over HTTPS
 
